@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=65.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ode_ingest"
+version = "0.1.0"
+
+dependencies = [
+    "pandas",
+    "sqlalchemy",
+    "pyodbc"
+]
