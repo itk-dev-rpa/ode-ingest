@@ -11,7 +11,7 @@ from sqlalchemy import Table, Column, String, MetaData, PrimaryKeyConstraint, in
 
 
 table_keys = {
-    "BO-aftale-haendelse": ["Eksterne reference nøgle"],
+    "BO-aftale-haendelse": ["Ekstern_reference_nøgle"],
     "BO-aftale": ["Aftalenummer", "Bilagsnummer", "Position"],
     "Bilag-aaben": None,
     "Bilag-lukket": ["Dato-ID", "Identifikation", "Intervalnummer", "Recordnummer"],
@@ -22,7 +22,7 @@ table_keys = {
     "Opsaetning-Aftalekontotype": ["Klient", "Sprognøgle", "Aftalekontotype"],
     "Opsaetning-Rykkerniveau": ["Sprognøgle", "Rykkeprocedure", "Rykkeniveau"],
     "RIM-aftale-rater": None,
-    "RIM-aftale-renter": ["Aftalenummer", "Intr-postnr"],
+    "RIM-aftale-renter": ["Aftalenummer", "Intr-posnr"],
     "RIM-aftale": None,
     "Rykker": ["Dato-ID", "Identifikation", "Forretningspartner", "Aftalekonto", "Rykkertæller", "Bilagsnummer", "Gentagelsesposition", "Position", "Delposition"],
     "UU-aftale-haefter": ["Klient", "Aftalenummer", "Forretningspartner"],
@@ -30,22 +30,26 @@ table_keys = {
 }
 
 table_date_columns = {
-    "BO-aftale-haendelse": None,
+    "BO-aftale-haendelse": ["Afskrivnings_dato", "Betalingsdato"],
     "BO-aftale": None,
-    "Bilag-aaben": None,
-    "Bilag-lukket": "Dato-ID",
-    "Bilag-master": None,
-    "FP-aftale": None,
+    "Bilag-aaben": "Bogføringsdato",
+    "Bilag-lukket": "Bogføringsdato",
+    "Bilag-master": "Registreringsdato",
+    "FP-aftale": "Oprettet_den",
     "Forretningspartner": None,
-    "Indbetalinger": None,
+    "Indbetalinger": "Oprettet_den",
     "Opsaetning-Aftalekontotype": None,
     "Opsaetning-Rykkerniveau": None,
-    "RIM-aftale-rater": None,
-    "RIM-aftale-renter": None,
-    "RIM-aftale": None,
-    "Rykker": "Dato-ID",
+    "RIM-aftale-rater": "Oprettet_den",
+    "RIM-aftale-renter": "Oprettet_den",
+    "RIM-aftale": "Oprettet_den",
+    "Rykker": "Udstedelsesdato",
     "UU-aftale-haefter": None,
     "UU-aftale": None,
+}
+
+table_date_formats = {
+    "Bilag-master": "%d.%m.%Y"
 }
 
 api_table_keys = {
@@ -67,7 +71,7 @@ api_table_keys = {
     "UU-aftale": None,
 }
 
-# Rework
+# Reworked ->>>
 
 
 def get_filenames(file, postfix):
@@ -104,6 +108,7 @@ class DateColumn:
     column: str
     start_date: str
     end_date: str
+    date_format: str
 
 
 def dataframe_from_csv(file_path: str, date_column: DateColumn | None = None):
@@ -114,8 +119,16 @@ def dataframe_from_csv(file_path: str, date_column: DateColumn | None = None):
             df.columns = df.columns.str.replace(' ', '_')
 
             if date_column:
-                df[date_column.column] = pd.to_datetime(df[date_column.column])
-                mask = (df[date_column.column] > date_column.start_date and df[date_column.column] < date_column.end_date)
+                start_date = pd.to_datetime(date_column.start_date)
+                end_date = pd.to_datetime(date_column.end_date)
+                if type(date_column.column) is list:
+                    mask = pd.Series(False, index=df.index)
+                    for col in date_column.column:
+                        df[col] = pd.to_datetime(df[col], format=date_column.date_format, errors='coerce')
+                        mask |= (df[col] >= start_date) & (df[col] <= end_date)
+                else:
+                    df[date_column.column] = pd.to_datetime(df[date_column.column], format=date_column.date_format, errors='coerce')
+                    mask = (df[date_column.column] >= start_date) & (df[date_column.column] <= end_date)
                 df = df.loc[mask]
                 if df.count == 0:
                     return None
@@ -128,12 +141,15 @@ def insert_data(file_path, table_name, engine):
     existing_data = pd.read_sql_table(table_name, engine, schema="ode")
     print(existing_data.columns)
     if table_date_columns[table_name]:
-        date_column = DateColumn(column=table_date_columns[table_name], start_date="", end_date="")
+        date_format = '%Y%m%d'
+        if table_name in table_date_formats:
+            date_format = table_date_formats[table_name]
+        date_column = DateColumn(column=table_date_columns[table_name], start_date="20231130", end_date="20231231", date_format=date_format)
     else:
         date_column = None
 
     df = dataframe_from_csv(file_path, date_column)
-    if not df:
+    if df.empty:
         return
 
     df = df[df.columns.intersection(existing_data.columns)]
@@ -191,7 +207,7 @@ def get_column_names(file_path):
         try:
             with open(file_path, 'r', encoding=encoding) as file:
                 elements = file.readline().strip().replace("\"", "").replace(" ", "_").split(';')
-                print(f"Removing some columns: {len([element for element in elements if not element])}")
+                # print(f"Removing some columns: {len([element for element in elements if not element])}")
                 return [element for element in elements if element]  # This may create issues with mapping to columns- needs investigation
         except UnicodeDecodeError:
             continue
@@ -226,11 +242,9 @@ def per_partial(directory, partial_names):
 
 
 def get_headlines():
-    # Læs delvise filnavne fra filenames.txt
     with open('file_names.txt', 'r', encoding='utf-8') as f:
         partial_names = [line.strip() for line in f]
 
-    # Find unikke kolonnenavne
     per_partial('\\\\adm.aarhuskommune.dk\\AAK\\Faelles\\MKB\\BackofficeDebitor_Rapporter', partial_names)
 
     print("done")
@@ -265,7 +279,6 @@ def add_data_to_sql():
     data = add_total_data_to_table()
 
     directory = '\\\\adm.aarhuskommune.dk\\AAK\\Faelles\\MKB\\BackofficeDebitor_Rapporter'
-    # TODO: Add column for date on changes
     engine = get_connection()
     metadata = MetaData(schema='ode')
     with engine.connect() as connection:

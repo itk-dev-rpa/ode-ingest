@@ -30,13 +30,15 @@ def create_table(name):
 def insert_total_data(table, from_file = 0, max_files = None):
     files = ode.find_files(config.FILE_DIRECTORY, [f"{table}_Total"])
     print(f"Found {len(files)} files")
+    i = from_file
     for file_path in files[from_file:max_files]:
-        print(f"Insert data from {file_path}")
+        print(f"Insert data from {file_path} at index {i}")
+        i += 1
         ode.insert_data(file_path, table, ode.get_connection())
 
 
 if __name__ == "__main__":
     for table in tables:
         print(f"Create table for {table}")
-        create_table(table)
-        insert_total_data(table, max_files=1)
+        # create_table(table)
+        insert_total_data(table, from_file=152)
