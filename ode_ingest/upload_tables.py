@@ -40,5 +40,5 @@ def insert_total_data(table, from_file = 0, max_files = None):
 if __name__ == "__main__":
     for table in tables:
         print(f"Create table for {table}")
-        # create_table(table)
+        create_table(table)
         insert_total_data(table, from_file=152)

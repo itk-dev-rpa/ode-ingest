@@ -1,13 +1,14 @@
 '''
-
+ODE files are exported from Opus Debitor and with these functions, read and imported to an SQL database.
+From the documentation we have a set of keys for indexes (adjusted from documentation) and
+some definitions of columns for date stamps.
 '''
 import os
 import os.path
 import pandas as pd
 from dataclasses import dataclass
 
-from sqlalchemy import create_engine
-from sqlalchemy import Table, Column, String, MetaData, PrimaryKeyConstraint, insert
+from sqlalchemy import create_engine, Engine
 
 
 table_keys = {
@@ -52,56 +53,6 @@ table_date_formats = {
     "Bilag-master": "%d.%m.%Y"
 }
 
-api_table_keys = {
-    "BO-aftale-haendelse": ["Klient", "Aftalenummer"],
-    "BO-aftale": ["Aftalenummer", "Bilagsnummer", "Position"],
-    "Bilag-aaben": None,
-    "Bilag-lukket": ["Dato-ID", "Identifikation", "Intervalnummer", "Recordnummer"],
-    "Bilag-master": ["Bilagsnummer", "Gentagelsesposition", "Position", "Delposition"],
-    "FP-aftale": None,
-    "Forretningspartner": ["Klient", "Forretningspartner", "Identifikationsart", "Identifikationsnr.", "Forretningspartner-GUID"],
-    "Indbetalinger": ["Art_kilde", "Betalingsidentifikator", "Løbenummer"],
-    "Opsaetning-Aftalekontotype": ["Klient", "Sprognøgle", "Aftalekontotype"],
-    "Opsaetning-Rykkerniveau": ["Sprognøgle", "Rykkeprocedure", "Rykkeniveau"],
-    "RIM-aftale-rater": None,
-    "RIM-aftale-renter": ["Aftalenummer"],
-    "RIM-aftale": None,
-    "Rykker": ["Dato-ID", "Identifikation", "Forretningspartner", "Aftalekonto", "Rykkertæller", "Bilagsnummer", "Gentagelsesposition", "Position", "Delposition"],
-    "UU-aftale-haefter": ["Klient", "Aftalenummer", "Forretningspartner"],
-    "UU-aftale": None,
-}
-
-# Reworked ->>>
-
-
-def get_filenames(file, postfix):
-    with open(file, 'r', encoding='utf-8') as f:
-        return [f"{line.strip()}{postfix}" for line in f]
-
-
-def add_data_to_tables(tables):
-    directory = '\\\\adm.aarhuskommune.dk\\AAK\\Faelles\\MKB\\BackofficeDebitor_Rapporter'
-    engine = get_connection()
-    for table in tables:
-        files = find_files(directory, [table])
-        for file_path in files:
-            insert_data(file_path, table.split("_")[0], engine)
-
-
-def get_connection():
-    connection_string = 'mssql+pyodbc://@SRVSQLHOTEL05/BackDataLake-Test?trusted_connection=yes&driver=ODBC+Driver+17+for+SQL+Server'
-    return create_engine(connection_string)
-
-
-def find_files(directory, partial_names):
-    files = []
-    for root, _, filenames in os.walk(directory):
-        for filename in filenames:
-            for partial_name in partial_names:
-                if partial_name in filename:
-                    files.append(os.path.join(root, filename))
-    return files
-
 
 @dataclass
 class DateColumn:
@@ -111,7 +62,40 @@ class DateColumn:
     date_format: str
 
 
+def get_connection():
+    connection_string = 'mssql+pyodbc://@SRVSQLHOTEL05/BackDataLake-Test?trusted_connection=yes&driver=ODBC+Driver+17+for+SQL+Server'
+    return create_engine(connection_string)
+
+
+def find_files(directory: str, partial_names: list[str]):
+    """Return files containing any of a list of partial names.
+
+    Args:
+        directory: Directory of files to look for.
+        partial_names: List of partial filenames, eg "BO-aaben", "Bilag-master_Total
+
+    Returns:
+        List of files from directory matching list of names.
+    """
+    files = []
+    for root, _, filenames in os.walk(directory):
+        for filename in filenames:
+            for partial_name in partial_names:
+                if partial_name in filename:
+                    files.append(os.path.join(root, filename))
+    return files
+
+
 def dataframe_from_csv(file_path: str, date_column: DateColumn | None = None):
+    """Read a CSV and create a pandas dataframe.
+
+    Args:
+        file_path: Path of file to convert.
+        date_column: Which column, if any, contains a date stamp, and which dates to restrict dataframe to. Defaults to None.
+
+    Returns:
+        Dataframe of CSV content, within the provided dates.
+    """
     encodings = ['utf-8', 'latin-1']
     for encoding in encodings:
         try:
@@ -137,9 +121,15 @@ def dataframe_from_csv(file_path: str, date_column: DateColumn | None = None):
             continue
 
 
-def insert_data(file_path, table_name, engine):
+def insert_data(file_path: str, table_name: str, engine: Engine):
+    """Add data to SQL.
+
+    Args:
+        file_path: File to add data from.
+        table_name: SQL table to add data to.
+        engine: SQL Engine to use.
+    """
     existing_data = pd.read_sql_table(table_name, engine, schema="ode")
-    print(existing_data.columns)
     if table_date_columns[table_name]:
         date_format = '%Y%m%d'
         if table_name in table_date_formats:
@@ -147,7 +137,6 @@ def insert_data(file_path, table_name, engine):
         date_column = DateColumn(column=table_date_columns[table_name], start_date="20231130", end_date="20231231", date_format=date_format)
     else:
         date_column = None
-
     df = dataframe_from_csv(file_path, date_column)
     if df.empty:
         return
@@ -162,58 +151,35 @@ def insert_data(file_path, table_name, engine):
     df.to_sql(table_name, engine, if_exists="append", schema="ode")
 
 
-def insert_data_columns(file_path, table_name, engine, columns):
-    existing_data = pd.read_sql_table(table_name, engine)
-    print(existing_data.columns)
+def get_column_names(file_path: str) -> list[str]:
+    """Find column names from a file.
 
-    df = dataframe_from_csv(file_path)
-    print(df.columns)
+    Args:
+        file_path: File to lookup.
 
-    df.drop(df.columns[df.columns.str.contains('^Unnamed', case=False)], axis=1, inplace=True)
-    df.drop(columns=[col for col in df if col not in columns], axis=1, inplace=True)
-    df.to_sql(table_name, engine, if_exists='append', index=False)
-
-
-def upsert_data(df, table_name, engine, keys):
-    # Læs eksisterende data fra tabellen
-    existing_data = pd.read_sql_table(table_name, engine)
-
-    # Find rækker der skal opdateres
-    update_data = df[df[keys].apply(tuple, axis=1).isin(existing_data[keys].apply(tuple, axis=1))]
-    new_data = df[~df[keys].apply(tuple, axis=1).isin(existing_data[keys].apply(tuple, axis=1))]
-
-    # Opdater eksisterende rækker
-    for _, row in update_data.iterrows():
-        set_clause = ', '.join([f"{col} = '{row[col]}'" for col in df.columns if col not in keys])
-        where_clause = ' AND '.join([f"{key} = '{row[key]}'" for key in keys])
-        engine.execute(
-            f"""
-            UPDATE {table_name}
-             SET {set_clause}
-            WHERE {where_clause}
-            """
-        )
-
-    # Indsæt nye rækker
-    new_data.to_sql(table_name, engine, if_exists='append', index=False)
-
-
-# ! Rework
-
-
-def get_column_names(file_path):
+    Returns:
+        List of column names.
+    """
     encodings = ['utf-8', 'latin-1']
     for encoding in encodings:
         try:
             with open(file_path, 'r', encoding=encoding) as file:
                 elements = file.readline().strip().replace("\"", "").replace(" ", "_").split(';')
-                # print(f"Removing some columns: {len([element for element in elements if not element])}")
-                return [element for element in elements if element]  # This may create issues with mapping to columns- needs investigation
+                return [element for element in elements if element]
         except UnicodeDecodeError:
             continue
 
 
-def unique_columns(directory, partial_names):
+def unique_columns(directory: str, partial_names: str) -> list[str]:
+    """For all files matching the partial name, find columns and print if any files are missing other columns.
+
+    Args:
+        directory: Directory to look for files.
+        partial_names: Partial name of file to look for (eg. "BO-udtraek_").
+
+    Returns:
+        Return all columns found across files matching the partial name.
+    """
     all_columns = set()
     files = find_files(directory, partial_names)
     for file_path in files:
@@ -227,115 +193,3 @@ def unique_columns(directory, partial_names):
             all_columns.add(column)
 
     return all_columns
-
-
-def per_partial(directory, partial_names):
-    """Print all unique columns for each partial name - a sanity check on the data.
-
-    Args:
-        directory: Directory of files.
-        partial_names: Set of data names to look for.
-    """
-    for name in partial_names:
-        columns = unique_columns(directory, [name])
-        print(f"{name}:\n{columns}")
-
-
-def get_headlines():
-    with open('file_names.txt', 'r', encoding='utf-8') as f:
-        partial_names = [line.strip() for line in f]
-
-    per_partial('\\\\adm.aarhuskommune.dk\\AAK\\Faelles\\MKB\\BackofficeDebitor_Rapporter', partial_names)
-
-    print("done")
-
-
-def generate_tables_from_filenames():
-    with open('file_names.txt', 'r', encoding='utf-8') as f:
-        partial_names = [line.strip() for line in f]
-    directory = '\\\\adm.aarhuskommune.dk\\AAK\\Faelles\\MKB\\BackofficeDebitor_Rapporter'
-    for name in partial_names:
-        columns = unique_columns(directory, [name])
-        print(f"Creating table {name[:-1]} with columns {columns}")
-        create_table(name[:-1], columns)
-
-
-def add_total_data_to_table():
-    table_data = {}
-    directory = '\\\\adm.aarhuskommune.dk\\AAK\\Faelles\\MKB\\BackofficeDebitor_Rapporter'
-    with open('partial_filenames.txt', 'r', encoding='utf-8') as f:
-        partial_names = [f"{line.strip()}Total" for line in f]
-    for table in partial_names:
-        files = find_files(directory, [table])
-        table_rows = []
-        for file_path in files:
-            print(f"adding {file_path}")
-            table_rows.append(read_data_from_csv(file_path))
-        table_data[table] = table_rows
-    return table_data
-
-
-def add_data_to_sql():
-    data = add_total_data_to_table()
-
-    directory = '\\\\adm.aarhuskommune.dk\\AAK\\Faelles\\MKB\\BackofficeDebitor_Rapporter'
-    engine = get_connection()
-    metadata = MetaData(schema='ode')
-    with engine.connect() as connection:
-        for table_name, table_data in data.items():
-            columns = unique_columns(directory, [table_name])
-            table = Table(table_name.split("_")[0], metadata, autoload_with=engine)
-            for value_set in table_data:
-                column_data = tuple(zip(*value_set))
-                stmt = insert(table).values({col: val for col, val in zip(columns, column_data)})
-                connection.execute(stmt)
-                connection.commit()
-
-
-def add_delta_data_to_table():
-    with open('file_names.txt', 'r', encoding='utf-8') as f:
-        partial_names = [f"{line.strip()}Delta" for line in f]
-    print(partial_names)
-
-
-def read_data_from_csv(file_path):
-    encodings = ['utf-8', 'latin-1']
-    for encoding in encodings:
-        try:
-            with open(file_path, 'r', encoding=encoding) as file:
-                rows = file.readlines()
-                rows.pop(0)
-                return [line.strip().replace("\"", "").split(';') for line in rows]
-        except UnicodeDecodeError:
-            continue
-
-
-def create_table(table_name, columns):
-    engine = get_connection()
-
-    metadata = MetaData(schema='ode')
-    primary_keys = table_keys[table_name]
-
-    columns_list = [Column(col, String(255)) for col in columns]
-
-    if (primary_keys):
-        primary_key_constraint = PrimaryKeyConstraint(*primary_keys)
-        columns_list.append(primary_key_constraint)
-    else:
-        columns_list.append(Column("index", String(255)))
-
-    Table(table_name, metadata, *columns_list)
-
-    metadata.create_all(engine)
-
-
-def enter_data(table_name, columns, values):
-    engine = get_connection()
-    metadata = MetaData(schema='ode')
-    table = Table(table_name, metadata, autoload_with=engine)
-
-    with engine.connect() as connection:
-        stmt = insert(table).values({col: val for col, val in zip(columns, values)})
-        connection.execute(stmt)
-        connection.commit()
-        print(f"Data indsat i tabel '{table_name}'")
