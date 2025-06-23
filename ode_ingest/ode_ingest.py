@@ -5,10 +5,11 @@ some definitions of columns for date stamps.
 '''
 import os
 import os.path
-import pandas as pd
 from dataclasses import dataclass
 
-from sqlalchemy import create_engine, Engine
+import pandas as pd
+
+from sqlalchemy import create_engine, Engine, Table, Column, String, MetaData, PrimaryKeyConstraint
 
 
 table_keys = {
@@ -149,6 +150,25 @@ def insert_data(file_path: str, table_name: str, engine: Engine):
     df.drop(df.columns[df.columns.str.contains('^Unnamed', case=False)], axis=1, inplace=True)
     print("Uploading to SQL")
     df.to_sql(table_name, engine, if_exists="append", schema="ode")
+
+
+def create_table(table_name, columns):
+    engine = get_connection()
+
+    metadata = MetaData(schema='ode')
+    primary_keys = table_keys[table_name]
+
+    columns_list = [Column(col, String(255)) for col in columns]
+
+    if (primary_keys):
+        primary_key_constraint = PrimaryKeyConstraint(*primary_keys)
+        columns_list.append(primary_key_constraint)
+    else:
+        columns_list.append(Column("index", String(255)))
+
+    Table(table_name, metadata, *columns_list)
+
+    metadata.create_all(engine)
 
 
 def get_column_names(file_path: str) -> list[str]:
