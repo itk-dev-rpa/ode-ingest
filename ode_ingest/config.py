@@ -1,1 +1,2 @@
 FILE_DIRECTORY = '\\\\adm.aarhuskommune.dk\\AAK\\Faelles\\MKB\\BackofficeDebitor_Rapporter'
+CONNECTION_STRING = 'mssql+pyodbc://@SRVSQLHOTEL05/BackDataLake-Test?trusted_connection=yes&driver=ODBC+Driver+17+for+SQL+Server'

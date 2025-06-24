@@ -5,11 +5,14 @@ some definitions of columns for date stamps.
 '''
 import os
 import os.path
-from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 
 from sqlalchemy import create_engine, Engine, Table, Column, String, MetaData, PrimaryKeyConstraint
+import config
+from csv_cleaner import CSVCleaner, DateColumn
 
 
 table_keys = {
@@ -55,19 +58,6 @@ table_date_formats = {
 }
 
 
-@dataclass
-class DateColumn:
-    column: str
-    start_date: str
-    end_date: str
-    date_format: str
-
-
-def get_connection():
-    connection_string = 'mssql+pyodbc://@SRVSQLHOTEL05/BackDataLake-Test?trusted_connection=yes&driver=ODBC+Driver+17+for+SQL+Server'
-    return create_engine(connection_string)
-
-
 def find_files(directory: str, partial_names: list[str]):
     """Return files containing any of a list of partial names.
 
@@ -88,7 +78,7 @@ def find_files(directory: str, partial_names: list[str]):
 
 
 def dataframe_from_csv(file_path: str, date_column: DateColumn | None = None):
-    """Read a CSV and create a pandas dataframe.
+    """Read a CSV and create a pandas dataframe. THIS IS LEGACY AND SHOULD BE REMOVED
 
     Args:
         file_path: Path of file to convert.
@@ -100,7 +90,7 @@ def dataframe_from_csv(file_path: str, date_column: DateColumn | None = None):
     encodings = ['utf-8', 'latin-1']
     for encoding in encodings:
         try:
-            df = pd.read_csv(file_path, encoding=encoding, sep=';', thousands='.', decimal=',')
+            df = pd.read_csv(file_path, encoding=encoding, sep=';', thousands='.', decimal=',', dtype='str')
             df.columns = df.columns.str.replace(' ', '_')
 
             if date_column:
@@ -122,28 +112,41 @@ def dataframe_from_csv(file_path: str, date_column: DateColumn | None = None):
             continue
 
 
-def insert_data(file_path: str, table_name: str, engine: Engine):
+def insert_data(file_path: str,
+                table_name: str,
+                engine: Engine,
+                date_filter: Optional[DateColumn] = None):
     """Add data to SQL.
 
     Args:
         file_path: File to add data from.
         table_name: SQL table to add data to.
         engine: SQL Engine to use.
+        date_filter: Dictionary med kolonnenavn, start- og slutdato
     """
     existing_data = pd.read_sql_table(table_name, engine, schema="ode")
-    if table_date_columns[table_name]:
-        date_format = '%Y%m%d'
-        if table_name in table_date_formats:
-            date_format = table_date_formats[table_name]
-        date_column = DateColumn(column=table_date_columns[table_name], start_date="20231130", end_date="20231231", date_format=date_format)
-    else:
-        date_column = None
-    df = dataframe_from_csv(file_path, date_column)
-    if df.empty:
+
+    cleaner = CSVCleaner()
+    csv_file = Path(file_path)
+
+    if not csv_file.exists():
         return
 
+    analysis = cleaner.analyze_csv(csv_file)
+    date_cols = [col for col, type_ in analysis['suggested_types'].items() if type_ == 'date']
+    int_cols = [col for col, type_ in analysis['suggested_types'].items() if type_ == 'integer']
+    float_cols = [col for col, type_ in analysis['suggested_types'].items() if type_ == 'float']
+
+    df = cleaner.read_csv_with_types(
+            csv_file,
+            date_columns=date_cols,
+            integer_columns=int_cols,
+            float_columns=float_cols,
+            date_filter=date_filter  # Valgfrit
+        )
+
     df = df[df.columns.intersection(existing_data.columns)]
-    df = df.astype(str)
+    # df = df.astype(str)  # Not needed, I think...
     if (table_keys[table_name] is not None):
         df.set_index(table_keys[table_name], inplace = True)
 
@@ -152,8 +155,14 @@ def insert_data(file_path: str, table_name: str, engine: Engine):
     df.to_sql(table_name, engine, if_exists="append", schema="ode")
 
 
-def create_table(table_name, columns):
-    engine = get_connection()
+def create_table(table_name: str, columns: list[str]):
+    """Create table in the SQL database with the table name and columns.
+
+    Args:
+        table_name: Table name for the table.
+        columns: Columns for the table.
+    """
+    engine = create_engine(config.CONNECTION_STRING)
 
     metadata = MetaData(schema='ode')
     primary_keys = table_keys[table_name]
