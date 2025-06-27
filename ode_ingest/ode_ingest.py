@@ -13,49 +13,7 @@ import pandas as pd
 from sqlalchemy import create_engine, Engine, Table, Column, String, MetaData, PrimaryKeyConstraint
 import config
 from csv_cleaner import CSVCleaner, DateColumn
-
-
-table_keys = {
-    "BO-aftale-haendelse": ["Ekstern_reference_nøgle"],
-    "BO-aftale": ["Aftalenummer", "Bilagsnummer", "Position"],
-    "Bilag-aaben": None,
-    "Bilag-lukket": ["Dato-ID", "Identifikation", "Intervalnummer", "Recordnummer"],
-    "Bilag-master": ["Bilagsnummer", "Gentagelsesposition", "Position", "Delposition"],
-    "FP-aftale": None,
-    "Forretningspartner": ["Klient", "Forretningspartner", "Identifikationsart", "Identifikationsnr.", "Forretningspartner-GUID"],
-    "Indbetalinger": ["Art_kilde", "Betalingsidentifikator", "Løbenummer"],
-    "Opsaetning-Aftalekontotype": ["Klient", "Sprognøgle", "Aftalekontotype"],
-    "Opsaetning-Rykkerniveau": ["Sprognøgle", "Rykkeprocedure", "Rykkeniveau"],
-    "RIM-aftale-rater": None,
-    "RIM-aftale-renter": ["Aftalenummer", "Intr-posnr"],
-    "RIM-aftale": None,
-    "Rykker": ["Dato-ID", "Identifikation", "Forretningspartner", "Aftalekonto", "Rykkertæller", "Bilagsnummer", "Gentagelsesposition", "Position", "Delposition"],
-    "UU-aftale-haefter": ["Klient", "Aftalenummer", "Forretningspartner"],
-    "UU-aftale": None,
-}
-
-table_date_columns = {
-    "BO-aftale-haendelse": ["Afskrivnings_dato", "Betalingsdato"],
-    "BO-aftale": None,
-    "Bilag-aaben": "Bogføringsdato",
-    "Bilag-lukket": "Bogføringsdato",
-    "Bilag-master": "Registreringsdato",
-    "FP-aftale": "Oprettet_den",
-    "Forretningspartner": None,
-    "Indbetalinger": "Oprettet_den",
-    "Opsaetning-Aftalekontotype": None,
-    "Opsaetning-Rykkerniveau": None,
-    "RIM-aftale-rater": "Oprettet_den",
-    "RIM-aftale-renter": "Oprettet_den",
-    "RIM-aftale": "Oprettet_den",
-    "Rykker": "Udstedelsesdato",
-    "UU-aftale-haefter": None,
-    "UU-aftale": None,
-}
-
-table_date_formats = {
-    "Bilag-master": "%d.%m.%Y"
-}
+from table_columns import table_keys, table_used_columns
 
 
 def find_files(directory: str, partial_names: list[str]):
@@ -122,16 +80,15 @@ def insert_data(file_path: str,
         file_path: File to add data from.
         table_name: SQL table to add data to.
         engine: SQL Engine to use.
-        date_filter: Dictionary med kolonnenavn, start- og slutdato
+        date_filter: Dictionary med kolonnenavn, start- og slutdato.
     """
-    existing_data = pd.read_sql_table(table_name, engine, schema="ode")
 
-    cleaner = CSVCleaner()
     csv_file = Path(file_path)
 
     if not csv_file.exists():
         return
 
+    cleaner = CSVCleaner()
     analysis = cleaner.analyze_csv(csv_file)
     date_cols = [col for col, type_ in analysis['suggested_types'].items() if type_ == 'date']
     int_cols = [col for col, type_ in analysis['suggested_types'].items() if type_ == 'integer']
@@ -145,9 +102,10 @@ def insert_data(file_path: str,
             date_filter=date_filter  # Valgfrit
         )
 
-    df = df[df.columns.intersection(existing_data.columns)]
-    # df = df.astype(str)  # Not needed, I think...
-    if (table_keys[table_name] is not None):
+    # df = dataframe_from_csv(csv_file)
+
+    df = df[df.columns.intersection(set(table_used_columns[table_name] + table_keys[table_name]))]
+    if table_keys[table_name] is not None:
         df.set_index(table_keys[table_name], inplace = True)
 
     df.drop(df.columns[df.columns.str.contains('^Unnamed', case=False)], axis=1, inplace=True)
@@ -169,7 +127,7 @@ def create_table(table_name: str, columns: list[str]):
 
     columns_list = [Column(col, String(255)) for col in columns]
 
-    if (primary_keys):
+    if primary_keys:
         primary_key_constraint = PrimaryKeyConstraint(*primary_keys)
         columns_list.append(primary_key_constraint)
     else:

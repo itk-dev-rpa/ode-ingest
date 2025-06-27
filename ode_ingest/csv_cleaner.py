@@ -9,10 +9,9 @@ from typing import Dict, List, Optional
 class DateColumn:
     """Dataclass for setting the date range for a data upload.
     """
-    column: str
+    column: str | list[str]
     start_date: str
     end_date: str
-    date_format: str
 
 
 class CSVCleaner:
@@ -23,7 +22,6 @@ class CSVCleaner:
     def __init__(self, encodings: List[str] = None):
         # Standard konfiguration for læsning af CSV
         self.csv_config = {
-            'encoding': 'utf-8',
             'sep': ';',  # Dansk standard separator
             'decimal': ',',  # Dansk decimal separator
             'thousands': '.',  # Dansk tusinde separator
@@ -80,7 +78,7 @@ class CSVCleaner:
             raise ValueError(f"Kunne ikke læse {filepath} med nogen af disse encodings: {self.encodings}")
 
         print(f"Indlæst {len(df)} rækker og {len(df.columns)} kolonner")
-        print(f"Kolonner: {list(df.columns)}")
+        # print(f"Kolonner: {list(df.columns)}")
 
         # Rens data
         df = self._clean_basic_data(df)
@@ -96,7 +94,7 @@ class CSVCleaner:
             df = self._convert_floats(df, float_columns)
 
         # Anvend dato-filtrering hvis specificeret
-        if date_filter and date_columns:
+        if date_filter:
             df = self._apply_date_filter(df, date_filter)
 
         return df
@@ -104,15 +102,12 @@ class CSVCleaner:
     def _clean_basic_data(self, df: pd.DataFrame) -> pd.DataFrame:
         """Grundlæggende datarensning"""
 
-        # Trim whitespace fra alle tekstkolonner og erstat mellemrum med underscore i kolonnenavne
-        df.columns = df.columns.str.replace(' ', '_').str.strip()
-
         for col in df.columns:
             if df[col].dtype == 'object':
-                df[col] = df[col].astype(str).str.strip()
+                df[col] = df[col].astype(str).str.strip().replace(".", "")
 
-        # Konverter tomme strenge til NaN
-        df = df.replace(['', ' ', 'nan', 'NaN'], np.nan)
+        # Konverter tomme strenge til NULL
+        df = df.replace(['', ' ', 'nan', 'NaN'], pd.NA).convert_dtypes()
 
         # Fjern "Unnamed" kolonner som pandas nogle gange tilføjer
         unnamed_cols = df.columns[df.columns.str.contains('^Unnamed', case=False, na=False)]
@@ -120,6 +115,8 @@ class CSVCleaner:
             print(f"Fjerner unnamed kolonner: {list(unnamed_cols)}")
             df = df.drop(columns=unnamed_cols)
 
+        # Trim whitespace fra alle tekstkolonner og erstat mellemrum med underscore i kolonnenavne
+        df.columns = df.columns.str.replace(' ', '_').str.strip()
         return df
 
     def _convert_dates(self, df: pd.DataFrame, date_columns: List[str]) -> pd.DataFrame:
@@ -178,7 +175,7 @@ class CSVCleaner:
                 df[col] = self._safe_float_conversion(df[col])
             else:
                 # Konverter til heltal
-                df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
+                df[col] = np.floor(pd.to_numeric(df[col].str.replace(".", ""), errors='coerce')).astype('Int64')
 
         return df
 
@@ -225,6 +222,7 @@ class CSVCleaner:
 
         # Læs først få rækker for at inspicere
         sample_df = pd.read_csv(filepath, dtype=str, nrows=100, **self.csv_config)
+        sample_df = self._clean_basic_data(sample_df)
 
         analysis = {
             'total_columns': len(sample_df.columns),
@@ -292,20 +290,77 @@ class CSVCleaner:
         start_dt = pd.to_datetime(date_filter.start_date, format='%Y%m%d')
         end_dt = pd.to_datetime(date_filter.end_date, format='%Y%m%d')
 
-        # Konverter kolonne tilbage til datetime midlertidigt for filtrering
-        temp_date_col = pd.to_datetime(df[date_filter.column], format='%d%m%Y', errors='coerce')
+        if isinstance(date_filter.column, list):
+            mask = pd.Series(False, index=df.index)
+            for col in date_filter.column:
+                temp_date_col = pd.to_datetime(df[col], format='%Y%m%d', errors='coerce')
+                mask |= (temp_date_col >= start_dt) & (temp_date_col <= end_dt)
+        else:
+            # Konverter kolonne tilbage til datetime midlertidigt for filtrering
+            temp_date_col = pd.to_datetime(df[date_filter.column], format='%Y%m%d', errors='coerce')
 
-        # Anvend filter
-        mask = (temp_date_col >= start_dt) & (temp_date_col <= end_dt)
+            # Anvend filter
+            mask = (temp_date_col >= start_dt) & (temp_date_col <= end_dt)
+
         filtered_df = df.loc[mask]
 
         print(f"Filtreret fra {len(df)} til {len(filtered_df)} rækker")
 
         if len(filtered_df) == 0:
             print("Advarsel: Ingen rækker matchede dato-filteret")
+            return df
 
         return filtered_df
 
+
+def _test_date(self, series: pd.Series) -> float:
+    """Test om værdier kan parses som datoer (inkl. kompakte formater)"""
+    success_count = 0
+
+    # Specifikke kompakte dato-formater at teste
+    compact_formats = [
+        '%Y%m%d',    # YYYYMMDD
+        '%d%m%Y',    # DDMMYYYY  
+        '%m%d%Y',    # MMDDYYYY
+        '%y%m%d',    # YYMMDD
+        '%d%m%y',    # DDMMYY
+    ]
+
+    for value in series:
+        try:
+            str_val = str(value).strip()
+
+            # Skip hvis det ligner timestamp
+            if str_val.isdigit() and len(str_val) in [10, 13]:
+                continue
+
+            # Skip hvis det indeholder tid
+            if any(indicator in str_val for indicator in [' ', 'T']) and ':' in str_val:
+                continue
+
+            parsed = None
+
+            # Først: prøv kompakte formater hvis det er kun cifre
+            if str_val.isdigit() and len(str_val) in [6, 8]:
+                for fmt in compact_formats:
+                    try:
+                        parsed = pd.to_datetime(str_val, format=fmt, errors='raise')
+                        break
+                    except:
+                        continue
+
+            # Hvis ikke parsed endnu, prøv automatisk parsing
+            if parsed is None:
+                parsed = pd.to_datetime(str_val, errors='raise', dayfirst=True)
+
+            # Verificer at det er en rimelig dato
+            if pd.Timestamp('1900-01-01') <= parsed <= pd.Timestamp('2100-12-31'):
+                success_count += 1
+
+        except (ValueError, TypeError, pd.errors.OutOfBoundsDatetime):
+            continue
+
+    return success_count / len(series) if len(series) > 0 else 0
 
 # Eksempel på brug
 def main():
