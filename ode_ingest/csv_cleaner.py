@@ -133,11 +133,13 @@ class CSVCleaner:
             converted = False
             for date_format in self.date_formats:
                 try:
-                    df[col] = pd.to_datetime(df[col], format=date_format, errors='coerce')
-                    successful_conversions = df[col].notna().sum()
-                    print(f"  Bruger format {date_format}: {successful_conversions} datoer konverteret")
-                    converted = True
-                    break
+                    new_col = pd.to_datetime(df[col], format=date_format, errors='coerce')
+                    successful_conversions = new_col.notna().sum()
+                    if successful_conversions:
+                        print(f"  Bruger format {date_format}: {successful_conversions} datoer konverteret")
+                        converted = True
+                        df[col] = new_col
+                        break
                 except (ValueError, TypeError, pd.errors.OutOfBoundsDatetime):
                     continue
 
@@ -152,8 +154,8 @@ class CSVCleaner:
 
             # Konverter til standardformat ddmmyyyy (som string)
             if converted:
-                df[col] = df[col].dt.strftime('%d%m%Y')
-                print(f"  Standardiseret {col} til format: ddmmyyyy")
+                df[col] = df[col].dt.strftime('%Y%m%d')
+                print(f"  Standardiseret {col} til format: yyyymmdd")
 
         return df
 
@@ -219,9 +221,19 @@ class CSVCleaner:
 
     def analyze_csv(self, filepath: Path) -> Dict:
         """Analysér CSV-fil for at foreslå datatyper"""
+        sample_df = None
 
-        # Læs først få rækker for at inspicere
-        sample_df = pd.read_csv(filepath, dtype=str, nrows=100, **self.csv_config)
+        for encoding in self.encodings:
+            try:
+                sample_df = pd.read_csv(filepath, dtype=str, encoding=encoding, nrows=100, **self.csv_config)
+                print(f"Succesfuld læsning med encoding: {encoding}")
+                break
+            except UnicodeDecodeError:
+                print(f"Encoding {encoding} fejlede, prøver næste...")
+                continue
+
+        if sample_df is None:
+            raise ValueError(f"Kunne ikke læse {filepath} med nogen af disse encodings: {self.encodings}")
         sample_df = self._clean_basic_data(sample_df)
 
         analysis = {
@@ -280,7 +292,7 @@ class CSVCleaner:
             print("Advarsel: Ufuldstændig dato-filter konfiguration")
             return df
 
-        if date_filter.column not in df.columns:
+        if (isinstance(date_filter.column, list) and not all(c in df.columns for c in date_filter.column)) or isinstance(date_filter.column, str) and date_filter.column not in df.columns:
             print(f"Advarsel: Filter-kolonne '{date_filter.column}' findes ikke")
             return df
 
@@ -308,7 +320,6 @@ class CSVCleaner:
 
         if len(filtered_df) == 0:
             print("Advarsel: Ingen rækker matchede dato-filteret")
-            return df
 
         return filtered_df
 

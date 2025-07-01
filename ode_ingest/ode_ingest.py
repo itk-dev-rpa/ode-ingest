@@ -104,7 +104,12 @@ def insert_data(file_path: str,
 
     # df = dataframe_from_csv(csv_file)
 
-    df = df[df.columns.intersection(set(table_used_columns[table_name] + table_keys[table_name]))]
+    columns = set()
+    for table_dict in [table_used_columns, table_keys]:
+        if table_name in table_dict and table_dict[table_name]:
+            columns.update(table_dict[table_name])
+    
+    df = df[df.columns.intersection(columns)]
     if table_keys[table_name] is not None:
         df.set_index(table_keys[table_name], inplace = True)
 
@@ -125,13 +130,20 @@ def create_table(table_name: str, columns: list[str]):
     metadata = MetaData(schema='ode')
     primary_keys = table_keys[table_name]
 
+    columns = set()
+    for table_dict in [table_used_columns, table_keys]:
+        if table_name in table_dict and table_dict[table_name]:
+            columns.update(table_dict[table_name])
+
     columns_list = [Column(col, String(255)) for col in columns]
 
     if primary_keys:
         primary_key_constraint = PrimaryKeyConstraint(*primary_keys)
         columns_list.append(primary_key_constraint)
-    else:
-        columns_list.append(Column("index", String(255)))
+    elif 'index' not in columns:
+        primary_key_constraint = PrimaryKeyConstraint('index')
+        columns_list.append(Column('index', String(255)))
+        columns_list.append(primary_key_constraint)
 
     Table(table_name, metadata, *columns_list)
 
