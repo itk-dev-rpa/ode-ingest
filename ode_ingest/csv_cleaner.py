@@ -44,6 +44,23 @@ class CSVCleaner:
             '%d/%m/%y',  # 01/12/24
         ]
 
+        self.date_patterns = [
+            # dd-mm-yyyy, dd/mm/yyyy, dd.mm.yyyy (dag 01-31, måned 01-12, år 1900-2099)
+            r'\b(?:0[1-9]|[12][0-9]|3[01])[-/\.](?:0[1-9]|1[0-2])[-/\.](?:19|20)\d{2}\b',
+
+            # dd-mm-yy, dd/mm/yy, dd.mm.yy (dag 01-31, måned 01-12, år 00-99)
+            r'\b(?:0[1-9]|[12][0-9]|3[01])[-/\.](?:0[1-9]|1[0-2])[-/\.]\d{2}\b',
+
+            # yyyy-mm-dd (år 1900-2099, måned 01-12, dag 01-31)
+            r'\b(?:19|20)\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])\b',
+
+            # yyyymmdd (år 1900-2099, måned 01-12, dag 01-31)
+            r'\b(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01])\b',
+
+            # mmddyyyy (måned 01-12, dag 01-31, år 1900-2099)
+            r'\b(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01])(?:19|20)\d{2}\b'
+        ]
+
     def read_csv_with_types(self, filepath: Path,
                             date_columns: Optional[List[str]] = None,
                             integer_columns: Optional[List[str]] = None,
@@ -155,6 +172,7 @@ class CSVCleaner:
             # Konverter til standardformat ddmmyyyy (som string)
             if converted:
                 df[col] = df[col].dt.strftime('%Y%m%d')
+                df[col] = df[col].fillna(pd.NA)
                 print(f"  Standardiseret {col} til format: yyyymmdd")
 
         return df
@@ -264,12 +282,7 @@ class CSVCleaner:
             return 'text'
 
         # Check for datoer
-        date_patterns = [
-            r'\d{1,2}[-/\.]\d{1,2}[-/\.]\d{2,4}',  # dd-mm-yyyy varianter
-            r'\d{4}-\d{1,2}-\d{1,2}'  # yyyy-mm-dd
-        ]
-
-        for pattern in date_patterns:
+        for pattern in self.date_patterns:
             if non_null.str.match(pattern).any():
                 return 'date'
 
@@ -372,6 +385,7 @@ def _test_date(self, series: pd.Series) -> float:
             continue
 
     return success_count / len(series) if len(series) > 0 else 0
+
 
 # Eksempel på brug
 def main():
