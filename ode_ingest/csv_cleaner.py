@@ -42,23 +42,27 @@ class CSVCleaner:
             '%d.%m.%Y',  # 01.12.2024
             '%d-%m-%y',  # 01-12-24
             '%d/%m/%y',  # 01/12/24
-        ]
+        ] 
+
+        # Kompakte regex patterns bygget fra komponenter
+        self.DAY = r'(?:0[1-9]|[12][0-9]|3[01])'      # 01-31
+        self.MONTH = r'(?:0[1-9]|1[0-2])'             # 01-12
+        self.YEAR_4 = r'(?:19|20)\d{2}'               # 1900-2099
+        self.YEAR_2 = r'\d{2}'                        # 00-99
+        self.SEP_OPT = r'[-/\.]?'                     # Valgfrie separatorer
 
         self.date_patterns = [
-            # dd-mm-yyyy, dd/mm/yyyy, dd.mm.yyyy (dag 01-31, måned 01-12, år 1900-2099)
-            r'\b(?:0[1-9]|[12][0-9]|3[01])[-/\.](?:0[1-9]|1[0-2])[-/\.](?:19|20)\d{2}\b',
+            # dd[-/.]mm[-/.]yyyy eller ddmmyyyy
+            rf'\b{self.DAY}{self.SEP_OPT}{self.MONTH}{self.SEP_OPT}{self.YEAR_4}\b',
 
-            # dd-mm-yy, dd/mm/yy, dd.mm.yy (dag 01-31, måned 01-12, år 00-99)
-            r'\b(?:0[1-9]|[12][0-9]|3[01])[-/\.](?:0[1-9]|1[0-2])[-/\.]\d{2}\b',
+            # dd[-/.]mm[-/.]yy eller ddmmyy
+            rf'\b{self.DAY}{self.SEP_OPT}{self.MONTH}{self.SEP_OPT}{self.YEAR_2}\b',
 
-            # yyyy-mm-dd (år 1900-2099, måned 01-12, dag 01-31)
-            r'\b(?:19|20)\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])\b',
+            # yyyy-mm-dd eller yyyymmdd
+            rf'\b{self.YEAR_4}{self.SEP_OPT}{self.MONTH}{self.SEP_OPT}{self.DAY}\b',
 
-            # yyyymmdd (år 1900-2099, måned 01-12, dag 01-31)
-            r'\b(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01])\b',
-
-            # mmddyyyy (måned 01-12, dag 01-31, år 1900-2099)
-            r'\b(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01])(?:19|20)\d{2}\b'
+            # mm[-/.]dd[-/.]yyyy eller mmddyyyy
+            rf'\b{self.MONTH}{self.SEP_OPT}{self.DAY}{self.SEP_OPT}{self.YEAR_4}\b'
         ]
 
     def read_csv_with_types(self, filepath: Path,
@@ -114,6 +118,9 @@ class CSVCleaner:
         if date_filter:
             df = self._apply_date_filter(df, date_filter)
 
+        # Konverter tomme strenge til NULL
+        df = df.replace(['', ' ', 'nan', 'NaN', np.nan], pd.NA).convert_dtypes()
+
         return df
 
     def _clean_basic_data(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -123,17 +130,14 @@ class CSVCleaner:
             if df[col].dtype == 'object':
                 df[col] = df[col].astype(str).str.strip().replace(".", "")
 
-        # Konverter tomme strenge til NULL
-        df = df.replace(['', ' ', 'nan', 'NaN'], pd.NA).convert_dtypes()
-
         # Fjern "Unnamed" kolonner som pandas nogle gange tilføjer
         unnamed_cols = df.columns[df.columns.str.contains('^Unnamed', case=False, na=False)]
         if len(unnamed_cols) > 0:
-            print(f"Fjerner unnamed kolonner: {list(unnamed_cols)}")
             df = df.drop(columns=unnamed_cols)
 
         # Trim whitespace fra alle tekstkolonner og erstat mellemrum med underscore i kolonnenavne
         df.columns = df.columns.str.replace(' ', '_').str.strip()
+
         return df
 
     def _convert_dates(self, df: pd.DataFrame, date_columns: List[str]) -> pd.DataFrame:
@@ -144,7 +148,7 @@ class CSVCleaner:
                 print(f"Advarsel: Kolonne '{col}' findes ikke")
                 continue
 
-            print(f"Konverterer {col} til dato...")
+            # print(f"Konverterer {col} til dato...")
 
             # Prøv forskellige datoformater
             converted = False
@@ -153,7 +157,7 @@ class CSVCleaner:
                     new_col = pd.to_datetime(df[col], format=date_format, errors='coerce')
                     successful_conversions = new_col.notna().sum()
                     if successful_conversions:
-                        print(f"  Bruger format {date_format}: {successful_conversions} datoer konverteret")
+                        #print(f"  Bruger format {date_format}: {successful_conversions} datoer konverteret")
                         converted = True
                         df[col] = new_col
                         break
@@ -173,7 +177,7 @@ class CSVCleaner:
             if converted:
                 df[col] = df[col].dt.strftime('%Y%m%d')
                 df[col] = df[col].fillna(pd.NA)
-                print(f"  Standardiseret {col} til format: yyyymmdd")
+                #print(f"  Standardiseret {col} til format: yyyymmdd")
 
         return df
 
@@ -185,7 +189,7 @@ class CSVCleaner:
                 print(f"Advarsel: Kolonne '{col}' findes ikke")
                 continue
 
-            print(f"Konverterer {col} til heltal...")
+            # print(f"Konverterer {col} til heltal...")
 
             # Check om der er komma i dataene (dansk decimal)
             has_decimals = df[col].astype(str).str.contains(',', na=False).any()
@@ -207,8 +211,9 @@ class CSVCleaner:
                 print(f"Advarsel: Kolonne '{col}' findes ikke")
                 continue
 
-            print(f"Konverterer {col} til decimal...")
+            # print(f"Konverterer {col} til decimal...")
             df[col] = self._safe_float_conversion(df[col])
+            df[col].fillna(0)
 
         return df
 
@@ -218,7 +223,7 @@ class CSVCleaner:
         # Håndter dansk format (komma som decimal, punktum som tusinde)
         def convert_danish_number(value):
             if pd.isna(value) or value == '':
-                return np.nan
+                return None
 
             value_str = str(value).strip()
 
@@ -370,7 +375,7 @@ def _test_date(self, series: pd.Series) -> float:
                     try:
                         parsed = pd.to_datetime(str_val, format=fmt, errors='raise')
                         break
-                    except:
+                    except Exception:
                         continue
 
             # Hvis ikke parsed endnu, prøv automatisk parsing

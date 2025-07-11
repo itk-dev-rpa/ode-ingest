@@ -5,12 +5,14 @@ some definitions of columns for date stamps.
 '''
 import os
 import os.path
+import time
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+from sqlalchemy.orm import sessionmaker
 
-from sqlalchemy import create_engine, Engine, Table, Column, String, MetaData, PrimaryKeyConstraint
+from sqlalchemy import create_engine, text, Engine, Table, Column, String, MetaData, PrimaryKeyConstraint
 import config
 from csv_cleaner import CSVCleaner, DateColumn
 from table_columns import table_keys, table_used_columns
@@ -27,66 +29,37 @@ def find_files(directory: str, partial_names: list[str]):
         List of files from directory matching list of names.
     """
     files = []
-    for root, _, filenames in os.walk(directory):
-        for filename in filenames:
-            for partial_name in partial_names:
-                if partial_name in filename:
-                    files.append(os.path.join(root, filename))
+    for filename in Path(directory).iterdir():
+        for partial_name in partial_names:
+            if partial_name in filename.name:
+                files.append(str(filename))
     return files
 
 
-def dataframe_from_csv(file_path: str, date_column: DateColumn | None = None):
-    """Read a CSV and create a pandas dataframe. THIS IS LEGACY AND SHOULD BE REMOVED
-
-    Args:
-        file_path: Path of file to convert.
-        date_column: Which column, if any, contains a date stamp, and which dates to restrict dataframe to. Defaults to None.
-
-    Returns:
-        Dataframe of CSV content, within the provided dates.
-    """
-    encodings = ['utf-8', 'latin-1']
-    for encoding in encodings:
-        try:
-            df = pd.read_csv(file_path, encoding=encoding, sep=';', thousands='.', decimal=',', dtype='str')
-            df.columns = df.columns.str.replace(' ', '_')
-
-            if date_column:
-                start_date = pd.to_datetime(date_column.start_date)
-                end_date = pd.to_datetime(date_column.end_date)
-                if type(date_column.column) is list:
-                    mask = pd.Series(False, index=df.index)
-                    for col in date_column.column:
-                        df[col] = pd.to_datetime(df[col], format=date_column.date_format, errors='coerce')
-                        mask |= (df[col] >= start_date) & (df[col] <= end_date)
-                else:
-                    df[date_column.column] = pd.to_datetime(df[date_column.column], format=date_column.date_format, errors='coerce')
-                    mask = (df[date_column.column] >= start_date) & (df[date_column.column] <= end_date)
-                df = df.loc[mask]
-                if df.count == 0:
-                    return None
-            return df
-        except UnicodeDecodeError:
-            continue
-
-
-def insert_data(file_path: str,
+def insert_data(df: pd.DataFrame,
                 table_name: str,
-                engine: Engine,
-                date_filter: Optional[DateColumn] = None):
+                engine: Engine):
     """Add data to SQL.
 
     Args:
-        file_path: File to add data from.
+        df: Dataframe to add data from.
         table_name: SQL table to add data to.
         engine: SQL Engine to use.
-        date_filter: Dictionary med kolonnenavn, start- og slutdato.
     """
+    print("Uploading to SQL")
+    metadata = MetaData()
+    table = Table(table_name, metadata, autoload_with=engine, schema=config.DB_SCHEMA)
 
+    with engine.begin() as conn:
+        conn.execute(table.insert(), df.to_dict('records'))
+    # df.to_sql(name=table_name, con=engine, if_exists="append", method='multi', chunksize=1000, schema=config.DB_SCHEMA)
+
+
+def create_dataframe_from_file(file_path: str, table_name: str, date_filter: Optional[DateColumn] = None) -> pd.DataFrame:
     csv_file = Path(file_path)
 
     if not csv_file.exists():
-        return
+        return None
 
     cleaner = CSVCleaner()
     analysis = cleaner.analyze_csv(csv_file)
@@ -102,20 +75,184 @@ def insert_data(file_path: str,
             date_filter=date_filter  # Valgfrit
         )
 
-    # df = dataframe_from_csv(csv_file)
-
+    # Make sure we only use the required columns
     columns = set()
     for table_dict in [table_used_columns, table_keys]:
         if table_name in table_dict and table_dict[table_name]:
             columns.update(table_dict[table_name])
-    
     df = df[df.columns.intersection(columns)]
-    if table_keys[table_name] is not None:
-        df.set_index(table_keys[table_name], inplace = True)
 
-    df.drop(df.columns[df.columns.str.contains('^Unnamed', case=False)], axis=1, inplace=True)
-    print("Uploading to SQL")
-    df.to_sql(table_name, engine, if_exists="append", schema="ode")
+    if table_keys[table_name] is None:
+        df.reset_index(allow_duplicates=True)
+
+    drop_columns = df.columns[df.columns.str.contains('^Unnamed', case=False)]
+    df.drop(drop_columns, axis=1, inplace=True)
+    return df
+
+
+def update_table_from_dataframe(df: pd.DataFrame, table_name: str, engine: Engine):
+    """Brug sqalchemy til at opdatere tabellen med nye værdier."""
+    key_columns = table_keys[table_name]
+    if not key_columns:
+        print("No keys found, inserting whole table.")
+        # There are no keys, just insert the whole table.
+        return insert_data(df, table_name, engine)
+    else:
+        df.set_index(key_columns, inplace=True)
+
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    try:
+        inserted = 0
+        updated = 0
+        new_records = []
+        index_data = df.to_dict('index')
+        for record in index_data:  # Here we get the index keys as keys for a dictionary of columns as keys with values
+            index_values = [record] if isinstance(record, str) else list(record)
+            index_keys = dict(zip(key_columns, index_values))
+
+            where_conditions = []
+            where_params = {}
+            # Set where clause from record as values for keys
+            for index in index_keys:
+                where_conditions.append(f"[{index}] = :key_{index.replace(".", "")}")
+                where_params[f"key_{index}".replace(".", "")] = index_keys[index]
+            where_clause = " AND ".join(where_conditions)
+
+            # Byg SET-klausul for update (alle kolonner undtagen keys)
+            set_conditions = []
+            update_params = {}
+            for col in index_data[record]:  # Access specific dictionary of this index
+                set_conditions.append(f"[{col}] = :update_{col.replace(".", "")}")
+                update_params[f"update_{col}".replace(".", "")] = index_data[record][col]
+
+            set_clause = ", ".join(set_conditions)
+
+            # Prøv at opdatere først
+            update_table = f"[{config.DB_NAME}].[{config.DB_SCHEMA}].[{table_name}]"   # Fix for some table names containing "-" when using sqlalchemy
+            update_sql = f"UPDATE {update_table} SET {set_clause} WHERE {where_clause}"
+            all_params = {**where_params, **update_params}
+
+            results = session.execute(text(update_sql), all_params)
+            if results.rowcount == 0:
+                inserted += 1
+                values = {**index_keys, **index_data[record]}
+                new_records.append(values)
+            else:
+                updated += 1
+
+        print(f"Updated {updated} rows, inserting {inserted} new rows from delta.")
+
+        new_records_df = pd.DataFrame(new_records)
+        if table_keys[table_name] is not None:
+            new_records_df.set_index(table_keys[table_name], inplace = True)
+        insert_data(new_records_df, table_name, engine)
+
+        session.commit()
+
+    except Exception as e:
+        print(e)
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def merge_table_from_dataframe(df: pd.DataFrame, table_name: str, engine: Engine):
+    """Brug SQL Server MERGE til at opdatere/indsætte data i bulk."""
+    key_columns = table_keys[table_name]
+    if not key_columns:
+        print("No keys found, inserting whole table.")
+        return insert_data(df, table_name, engine)
+
+    # Opret temp table navn
+    temp_table = f"#temp_{table_name}_{int(time.time())}"
+
+    try:
+        # 1. Upload dataframe til temp table
+        print(f"Uploading {len(df)} rows to temp table...")
+        # Brug almindelig engine connection
+
+        metadata = MetaData(schema='ode')
+        Table(temp_table, metadata, *[Column(col, String(255)) for col in list(df.columns)])
+        metadata.create_all(engine)
+
+        insert_data(df, temp_table, engine)
+
+        # 2. Byg MERGE statement
+        target_table = f"[{config.DB_NAME}].[{config.DB_SCHEMA}].[{table_name}]"
+        temp_table = f"[{config.DB_NAME}].[{config.DB_SCHEMA}].[{temp_table}]"
+
+        # ON clause - match på primary keys
+        on_conditions = []
+        for key in key_columns:
+            on_conditions.append(f"target.[{key}] = source.[{key}]")
+        on_clause = " AND ".join(on_conditions)
+
+        # SET clause - alle kolonner undtagen keys
+        data_columns = [col for col in df.columns if col not in key_columns]
+        set_conditions = []
+        for col in data_columns:
+            set_conditions.append(f"[{col}] = source.[{col}]")
+        set_clause = ", ".join(set_conditions)
+
+        # INSERT clause - alle kolonner
+        all_columns = df.columns.tolist()
+        insert_columns = ", ".join([f"[{col}]" for col in all_columns])
+        insert_values = ", ".join([f"source.[{col}]" for col in all_columns])
+
+        merge_sql = f"""
+        MERGE {target_table} AS target
+        USING {temp_table} AS source
+        ON {on_clause}
+        WHEN MATCHED THEN
+            UPDATE SET {set_clause}
+        WHEN NOT MATCHED THEN
+            INSERT ({insert_columns})
+            VALUES ({insert_values})
+        OUTPUT $action, inserted.*;
+        """
+
+        # 3. Kør MERGE og få resultater
+        print("Running MERGE operation...")
+        with engine.connect() as conn:
+            result = conn.execute(text(merge_sql))
+
+            # Tæl resultater fra OUTPUT
+            updated = 0
+            inserted = 0
+            try:
+                for row in result:
+                    if row[0] == 'UPDATE':
+                        updated += 1
+                    elif row[0] == 'INSERT':
+                        inserted += 1
+            except Exception:
+                # Hvis OUTPUT ikke virker, kør uden
+                pass
+
+            print(f"MERGE completed: {updated} updated, {inserted} inserted")
+            conn.commit()
+
+    except Exception as e:
+        print(f"MERGE failed: {e}")
+        raise
+    finally:
+        # Ryd op temp table
+        try:
+            with engine.connect() as conn:
+                conn.execute(text(f"DROP TABLE IF EXISTS {temp_table}"))
+                conn.commit()
+        except Exception:
+            pass  # Temp tables ryddes automatisk op
+        # Ryd op temp table
+        try:
+            with engine.raw_connection() as raw_conn:
+                cursor = raw_conn.cursor()
+                cursor.execute(f"DROP TABLE IF EXISTS {temp_table}")
+                raw_conn.commit()
+        except Exception:
+            pass  # Temp tables ryddes automatisk op
 
 
 def create_table(table_name: str, columns: list[str]):
@@ -125,10 +262,10 @@ def create_table(table_name: str, columns: list[str]):
         table_name: Table name for the table.
         columns: Columns for the table.
     """
-    engine = create_engine(config.CONNECTION_STRING)
+    engine = create_engine(config.CONNECTION_STRING.replace("{DB_NAME}", config.DB_NAME))
 
     metadata = MetaData(schema='ode')
-    primary_keys = table_keys[table_name]
+    primary_keys = table_keys[table_name] if table_name in table_keys else None
 
     columns = set()
     for table_dict in [table_used_columns, table_keys]:
@@ -140,10 +277,10 @@ def create_table(table_name: str, columns: list[str]):
     if primary_keys:
         primary_key_constraint = PrimaryKeyConstraint(*primary_keys)
         columns_list.append(primary_key_constraint)
-    elif 'index' not in columns:
-        primary_key_constraint = PrimaryKeyConstraint('index')
-        columns_list.append(Column('index', String(255)))
-        columns_list.append(primary_key_constraint)
+    # elif 'index' not in columns:
+    #     primary_key_constraint = PrimaryKeyConstraint('index')
+    #     columns_list.append(Column('index', String(255)))
+    #     columns_list.append(primary_key_constraint)
 
     Table(table_name, metadata, *columns_list)
 
